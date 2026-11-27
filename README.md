@@ -4,8 +4,10 @@ NovAir is the Persian, right-to-left website and customer portal for a two-perso
 
 **Release status:** The local application is functional. The Linux installer supports protected staging. Public account access still requires a complete email verification and recovery workflow and qualification on the intended host. The messaging wizard configures and tests delivery independently.
 
+- [Clone the private repository](#clone-the-private-repository)
 - [Run locally](#run-locally)
 - [Install on Linux staging](#install-on-linux-staging)
+- [One-command staging install](#one-command-staging-install)
 - [Configure Gmail and sms.ir](#configure-gmail-and-smsir)
 - [Update and rehearse rollback](#update-and-rehearse-rollback)
 - [Testing and maintenance](#testing-and-maintenance)
@@ -21,6 +23,61 @@ NovAir is the Persian, right-to-left website and customer portal for a two-perso
 | Operations | Linux staging installation, port planning, same-schema updates and rollback, a disposable rehearsal runner, Gmail SMTP and sms.ir test delivery |
 
 The stack is Next.js App Router, strict TypeScript, Tailwind CSS, Prisma, MySQL, and Better Auth. Vazirmatn is hosted locally.
+
+## Clone the private repository
+
+[`Cat-Ghost-Community/Novair-Team`](https://github.com/Cat-Ghost-Community/Novair-Team) is private. Use an SSH key or an authenticated HTTPS clone. Anonymous clones and raw-file requests may return `404` for a private repository. If the repository later becomes public, skip authentication and use an anonymous HTTPS clone.
+
+### SSH key setup
+
+1. Use an existing authorized key, or generate a new Ed25519 key under the user who will clone the project. On a server, use a dedicated key for this repository. If the example filename already exists, reuse the intended key or choose a new filename.
+
+   ```bash
+   mkdir -p ~/.ssh
+   chmod 700 ~/.ssh
+   ssh-keygen -t ed25519 -C "novair-staging" -f ~/.ssh/novair_team_ed25519
+   cat ~/.ssh/novair_team_ed25519.pub
+   ```
+
+2. Add only the `.pub` file’s contents to GitHub. For a personal machine, use **Settings → SSH and GPG keys → New SSH key**. For a server, use **Novair-Team → Settings → Deploy keys → Add deploy key** and leave write access unchecked. [GitHub deploy key guide](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys)
+3. If the key has a passphrase, load it into your existing SSH agent. Start an agent first if the current shell has none:
+
+   ```bash
+   if [ -z "${SSH_AUTH_SOCK:-}" ]; then eval "$(ssh-agent -s)"; fi
+   ssh-add ~/.ssh/novair_team_ed25519
+   ```
+
+4. Test the exact key before cloning. At the first connection, compare the host fingerprint with GitHub’s published values before accepting it. GitHub’s success message can still exit with status `1` because GitHub provides Git access without an interactive shell. [GitHub SSH connection test](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/testing-your-ssh-connection)
+
+   ```bash
+   ssh -o IdentitiesOnly=yes -i ~/.ssh/novair_team_ed25519 -T git@github.com
+   ```
+
+5. Clone the `main` branch. The clone-specific setting keeps future fetches tied to this key.
+
+   ```bash
+   git clone --branch main \
+     --config core.sshCommand='ssh -o IdentitiesOnly=yes -i ~/.ssh/novair_team_ed25519' \
+     git@github.com:Cat-Ghost-Community/Novair-Team.git novair
+   cd novair
+   ```
+
+   To switch an existing **Novair-Team** HTTPS checkout to SSH, run from that checkout:
+
+   ```bash
+   git remote set-url origin git@github.com:Cat-Ghost-Community/Novair-Team.git
+   git config --local core.sshCommand 'ssh -o IdentitiesOnly=yes -i ~/.ssh/novair_team_ed25519'
+   ```
+
+### HTTPS with a GitHub token
+
+Create a [fine-grained personal access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) scoped to **Novair-Team**, with **Contents: Read-only** and an expiration. At Git’s prompts, enter your GitHub username and use the token as the password. Disabling the credential helper for this command keeps the token out of saved Git credentials. Enter it at the prompt so it stays out of the URL and shell history.
+
+```bash
+git -c credential.helper= clone --branch main \
+  https://github.com/Cat-Ghost-Community/Novair-Team.git novair
+cd novair
+```
 
 ## Run locally
 
@@ -101,6 +158,46 @@ journalctl --user -u novair.service -n 50
 ```
 
 The existing reverse proxy is under operator control. Keep staging access restricted, validate the complete proxy configuration before reloading it, and verify HTTPS, the canonical origin, homepage readiness, and `noindex`. The current staging profile keeps account access and search indexing closed.
+
+### One-command staging install
+
+Finish [host preparation](#prepare-the-host) and create the [private database credentials file](#install) first. Run one of these blocks in a Bash terminal as the dedicated **non-root** NovAir user. Replace the example domain and credential path. The command clones the full checkout and starts the wizard, which installs the locked application dependencies. Host packages, database provisioning, DNS, and TLS are prerequisites. The wizard uses files from the checkout, so downloading and running an individual installer file is insufficient.
+
+For a rehearsal or shared host, clone and review the release first if you need to pin a specific commit. The shortcuts below use the current `main` branch.
+
+**Private repository with an SSH deploy key**
+
+```bash
+git clone --branch main \
+  --config core.sshCommand='ssh -o IdentitiesOnly=yes -i ~/.ssh/novair_team_ed25519' \
+  git@github.com:Cat-Ghost-Community/Novair-Team.git novair-staging &&
+  cd novair-staging &&
+  node --experimental-strip-types scripts/install-server.mjs \
+    --domain staging.example.org --database-env /private/novair/database.env
+```
+
+**Private repository with a GitHub token**
+
+Use the username and token prompts described under [HTTPS with a GitHub token](#https-with-a-github-token).
+
+```bash
+git -c credential.helper= clone --branch main \
+  https://github.com/Cat-Ghost-Community/Novair-Team.git novair-staging &&
+  cd novair-staging &&
+  node --experimental-strip-types scripts/install-server.mjs \
+    --domain staging.example.org --database-env /private/novair/database.env
+```
+
+**Anonymous HTTPS if the repository becomes public**
+
+```bash
+git clone --branch main https://github.com/Cat-Ghost-Community/Novair-Team.git novair-staging &&
+  cd novair-staging &&
+  node --experimental-strip-types scripts/install-server.mjs \
+    --domain staging.example.org --database-env /private/novair/database.env
+```
+
+Open the [messaging wizard](#configure-gmail-and-smsir) separately when ready to configure Gmail and sms.ir.
 
 ## Configure Gmail and sms.ir
 
