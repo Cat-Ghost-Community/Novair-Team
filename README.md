@@ -2,43 +2,16 @@
 
 ## Quick install
 
-Run one block in an interactive Bash terminal after [preparing the Linux server](#linux-server-installation-guide). Both commands download `setup.sh`, clone the project, and open the setup wizard to ask for the staging hostname and database credential file. They use `sudo -u novair` so the wizard runs under the dedicated NovAir account. Replace `novair` if you chose a different user.
-
-### Public repo
-
-Use this while [Novair-Team](https://github.com/Cat-Ghost-Community/Novair-Team) is public.
+Paste this command into an interactive Bash terminal as the dedicated NovAir Linux user after [preparing the server](#linux-server-installation-guide). It downloads the launcher and opens the setup wizard in the same terminal.
 
 ```bash
 (
   setup_file="$(mktemp /tmp/novair-setup.XXXXXXXX)" || exit 1
   trap 'rm -f -- "$setup_file"' EXIT
   curl -fsSL https://raw.githubusercontent.com/Cat-Ghost-Community/Novair-Team/main/setup.sh \
-    -o "$setup_file" && sudo -H -u novair bash -s < "$setup_file"
+    -o "$setup_file" && bash "$setup_file"
 )
 ```
-
-### Private repo
-
-[Create a fine-grained GitHub token](https://github.com/settings/personal-access-tokens/new) scoped to **Novair-Team**, with **Contents: Read-only**. The download uses the GitHub Contents API and reads the token from a hidden prompt.
-
-```bash
-(
-  set +x
-  unset github_token
-  read -rsp "GitHub token: " github_token || exit 1
-  printf '\n'
-  setup_file="$(mktemp /tmp/novair-setup.XXXXXXXX)" || exit 1
-  trap 'rm -f -- "$setup_file"' EXIT
-  printf 'Authorization: Bearer %s\n' "$github_token" |
-    curl -fsSL -H @- -H 'Accept: application/vnd.github.raw+json' \
-      'https://api.github.com/repos/Cat-Ghost-Community/Novair-Team/contents/setup.sh?ref=main' \
-      -o "$setup_file" &&
-    unset github_token &&
-    sudo -H -u novair bash -s -- --private < "$setup_file"
-)
-```
-
-When Git asks for credentials for the private clone, enter your GitHub username and use the same token at the password prompt. If you prefer a deploy key, follow [SSH key setup](#ssh-key-setup).
 
 ## Linux server installation guide
 
@@ -71,27 +44,6 @@ journalctl --user -u novair.service -n 50
 ```
 
 The Nginx and Apache fragments are saved in `~/.config/novair/` or `$XDG_CONFIG_HOME/novair/`. Use the correct fragment in NovAir’s HTTPS virtual host, validate the complete proxy configuration, and confirm the staging hostname serves the expected homepage with `noindex`. The wizard keeps staging account access and search indexing closed.
-
-### SSH key setup
-
-For a private repository, sign in as the dedicated NovAir user and generate a deployment key, or reuse one that is already authorized for this repository. If the example key file exists, choose another filename.
-
-```bash
-mkdir -p ~/.ssh
-chmod 700 ~/.ssh
-ssh-keygen -t ed25519 -C novair-staging -f ~/.ssh/novair_team_ed25519
-cat ~/.ssh/novair_team_ed25519.pub
-```
-
-Add the public key under **Novair-Team → Settings → Deploy keys → Add deploy key** with write access unchecked. Verify GitHub’s host fingerprint on the first connection. Load a passphrase-protected key into your SSH agent before cloning. [GitHub’s deploy key guide](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys) · [GitHub’s SSH fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints)
-
-```bash
-git clone --branch main \
-  --config core.sshCommand='ssh -o IdentitiesOnly=yes -i ~/.ssh/novair_team_ed25519' \
-  git@github.com:Cat-Ghost-Community/Novair-Team.git novair-staging &&
-  cd novair-staging &&
-  node --experimental-strip-types scripts/install-server.mjs
-```
 
 ### Update, rehearse rollback, and configure messages
 
