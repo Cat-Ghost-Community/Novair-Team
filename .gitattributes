@@ -1,2 +1,3 @@
 # Prisma migration checksums must match across Linux and Windows checkouts.
 prisma/migrations/** text eol=lf
+setup.sh text eol=lf

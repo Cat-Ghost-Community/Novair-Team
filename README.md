@@ -4,11 +4,11 @@ NovAir is the Persian, right-to-left website and customer portal for a two-perso
 
 **Release status:** The local application is functional. The Linux installer supports protected staging. Public account access still requires a complete email verification and recovery workflow and qualification on the intended host. The messaging wizard configures and tests delivery independently.
 
-- [Clone the private repository](#clone-the-private-repository)
+- [Clone the repository](#clone-the-repository)
 - [Run locally](#run-locally)
 - [Install on Linux staging](#install-on-linux-staging)
 - [One-command staging install](#one-command-staging-install)
-  - [Public repository shortcut](#public-repository)
+  - [Public quick-install link](#public-repository)
 - [Configure Gmail and sms.ir](#configure-gmail-and-smsir)
 - [Update and rehearse rollback](#update-and-rehearse-rollback)
 - [Testing and maintenance](#testing-and-maintenance)
@@ -25,9 +25,9 @@ NovAir is the Persian, right-to-left website and customer portal for a two-perso
 
 The stack is Next.js App Router, strict TypeScript, Tailwind CSS, Prisma, MySQL, and Better Auth. Vazirmatn is hosted locally.
 
-## Clone the private repository
+## Clone the repository
 
-[`Cat-Ghost-Community/Novair-Team`](https://github.com/Cat-Ghost-Community/Novair-Team) is private. Use an SSH key or an authenticated HTTPS clone. Anonymous clones and raw-file requests may return `404` for a private repository. If the repository later becomes public, skip authentication and use an anonymous HTTPS clone.
+[`Cat-Ghost-Community/Novair-Team`](https://github.com/Cat-Ghost-Community/Novair-Team) is currently public. Use the [public quick-install link](#public-repository) or clone over HTTPS. If repository access changes to private, use an SSH key or an authenticated HTTPS clone. Anonymous clones and raw-file requests may return `404` for a private repository.
 
 ### SSH key setup
 
@@ -162,9 +162,22 @@ The existing reverse proxy is under operator control. Keep staging access restri
 
 ### One-command staging install
 
-Finish [host preparation](#prepare-the-host) and create the [private database credentials file](#install) first. Run one of these blocks in a Bash terminal as the dedicated **non-root** NovAir user. Replace the example domain and credential path. The command clones the full checkout and starts the wizard, which installs the locked application dependencies. Host packages, database provisioning, DNS, and TLS are prerequisites. The wizard uses files from the checkout, so downloading and running an individual installer file is insufficient.
+Finish [host preparation](#prepare-the-host) and create the [private database credentials file](#install) first. Run one of these blocks in a Bash terminal as the dedicated **non-root** NovAir user. Host packages, database provisioning, DNS, and TLS are prerequisites. The public quick-install launcher fetches the full checkout automatically.
 
 For a rehearsal or shared host, clone and review the release first if you need to pin a specific commit. The shortcuts below use the current `main` branch.
+
+#### Public repository
+
+> [!IMPORTANT]
+> This quick-install link requires a **public** repository. Novair-Team is currently public. Run the command as your dedicated NovAir Linux user.
+
+```bash
+setup_file="$(mktemp "$HOME/novair-setup.XXXXXXXX")" &&
+  curl -fsSL https://raw.githubusercontent.com/Cat-Ghost-Community/Novair-Team/main/setup.sh -o "$setup_file" &&
+  bash "$setup_file"
+```
+
+The launcher creates a private checkout under `~/.local/share/novair/releases/` and opens the staging wizard. Have your staging domain and the path to your database credentials file ready. The wizard can also accept them through `bash "$setup_file" --domain staging.example.org --database-env /private/novair/database.env`.
 
 #### Private repository with an SSH deploy key
 
@@ -184,20 +197,6 @@ Use the username and token prompts described under [HTTPS with a GitHub token](#
 ```bash
 git -c credential.helper= clone --branch main \
   https://github.com/Cat-Ghost-Community/Novair-Team.git novair-staging &&
-  cd novair-staging &&
-  node --experimental-strip-types scripts/install-server.mjs \
-    --domain staging.example.org --database-env /private/novair/database.env
-```
-
-#### Public repository
-
-> [!IMPORTANT]
-> This shortcut works only if **Novair-Team is made public**. The repository is currently private. Use the [SSH deploy key](#private-repository-with-an-ssh-deploy-key) or [GitHub token](#private-repository-with-a-github-token) option above.
-
-Once the repository is public, run the following as the dedicated NovAir user after [preparing the staging host](#prepare-the-host). Replace the domain and credential-file path with your staging values.
-
-```bash
-git clone --branch main https://github.com/Cat-Ghost-Community/Novair-Team.git novair-staging &&
   cd novair-staging &&
   node --experimental-strip-types scripts/install-server.mjs \
     --domain staging.example.org --database-env /private/novair/database.env
