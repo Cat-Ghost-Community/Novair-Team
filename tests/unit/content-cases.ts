@@ -1,0 +1,22 @@
+import assert from "node:assert/strict";
+import { safePublicProjectUrl, safePortfolioImageKey } from "../../src/server/content/policy.ts";
+import { editorialFaqs } from "../../src/content/home.ts";
+
+export const contentCases: [string, () => void][] = [
+  ["public project links preserve safe HTTPS paths without accepting credentials or active schemes", () => {
+    assert.equal(safePublicProjectUrl("https://example.com/project?view=public#overview"), "https://example.com/project?view=public#overview");
+    for (const value of [null, "javascript:alert(1)", "data:text/html,hi", "//evil.example/path", "http://example.com", "https://user:secret@example.com", "https://example.com\\@evil.example", " https://example.com", "https://example.com/\npath"]) assert.equal(safePublicProjectUrl(value), null);
+  }],
+  ["internal preview addresses cannot become public portfolio links", () => {
+    for (const value of ["https://localhost", "https://app.localhost", "https://admin.local", "https://127.0.0.1", "https://192.168.1.1", "https://[::1]", "https://2130706433"]) assert.equal(safePublicProjectUrl(value), null);
+  }],
+  ["portfolio image keys are confined to generated raster filenames", () => {
+    assert.equal(safePortfolioImageKey("portfolio/work_abc-1.webp"), "portfolio/work_abc-1.webp");
+    for (const key of [null, "../.env", "portfolio/../../.env", "portfolio/%2e%2e.png", "portfolio/a.svg", "https://example.com/a.png", "/portfolio/a.png", "portfolio/sub/a.png", "portfolio/a.png?x=1", "portfolio\\a.png"]) assert.equal(safePortfolioImageKey(key), null);
+  }],
+  ["editorial FAQ controls have unique stable identities and complete readable answers", () => {
+    assert.equal(new Set(editorialFaqs.map((faq) => faq.id)).size, editorialFaqs.length);
+    assert(editorialFaqs.every((faq) => faq.question.trim().length >= 10 && faq.answer.trim().length >= 30));
+    assert(editorialFaqs.some((faq) => faq.answer.includes("با ورود به حساب، درخواستت را ثبت کن")));
+  }],
+];

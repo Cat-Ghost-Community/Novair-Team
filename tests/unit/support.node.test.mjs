@@ -1,0 +1,6 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
+import {ticketCreateSchema,ticketReplySchema,ticketStateSchema,ticketReadSchema,ticketTransitions,ticketListSchema} from '../../src/shared/ticket-contracts.ts';
+test('support normalizes Persian/plain text and rejects mass assignment/bidi controls',()=>{const input={operationKey:randomUUID(),subject:'  پرسش   فنی  ',category:'TECHNICAL',body:'متن\r\nواقعی'};const parsed=ticketCreateSchema.parse(input);assert.equal(parsed.subject,'پرسش فنی');assert.equal(parsed.body,'متن\nواقعی');assert.equal(parsed.projectId,null);for(const extra of[{ownerId:'injected'},{priority:'HIGH'},{body:'متن\u202eناامن'}])assert(!ticketCreateSchema.safeParse({...input,...extra}).success);});
+test('support contracts make closed reopening explicit and constrain replies/read watermarks/pagination',()=>{assert.deepEqual(ticketTransitions.CLOSED,['WAITING_SUPPORT']);assert(!ticketReplySchema.safeParse({operationKey:randomUUID(),body:'x',authorRole:'ADMIN'}).success);assert(!ticketReadSchema.safeParse({through:-1}).success);assert(!ticketListSchema.safeParse({page:'0'}).success);assert(!ticketStateSchema.safeParse({operationKey:randomUUID(),expectedVersion:0,toStatus:'OPEN'}).success);});

@@ -1,0 +1,143 @@
+import { before, beforeEach, after, test } from "node:test";
+import { readFile, mkdir } from "node:fs/promises";
+import { randomUUID, randomBytes } from "node:crypto";
+import { PrismaClient } from "@prisma/client";
+import { expect } from "@playwright/test";
+import { openBrowser } from "../shared/open-browser.mjs";
+import { auditPage } from "../shared/accessibility.ts";
+
+const origin=process.env.NOVAIR_TEST_ORIGIN;
+if(origin!=="http://127.0.0.1:3100")throw Error("Owned isolated request test server required.");
+const fixture=JSON.parse(await readFile(".local-tools/auth-test-context.json","utf8"));
+if(new URL(process.env.DATABASE_URL).pathname!==`/${fixture.name}`||!/^novair_auth_test_[a-f0-9]{12}$/.test(fixture.name))throw Error("Owned MySQL context required.");
+const db=new PrismaClient();let browser;
+const output=`${process.env.NOVAIR_TEST_OUTPUT || "test-results/prompt05"}/requests`;
+before(async()=>{
+  expect((await db.siteSetting.findUnique({where:{key:"__novair_auth_test"}})).value.nonce).toBe(fixture.nonce);
+  browser = await openBrowser();
+  await mkdir(output, { recursive: true });
+  console.log(`Real request workflows, isolated MySQL/contexts; Chromium ${browser.version()}.`);
+});
+beforeEach(async()=>{await db.rateLimit.deleteMany();});
+after(async()=>{await browser?.close();await db.$disconnect();});
+function scenario(name,run){test(name,async()=>{const context=await browser.newContext({baseURL:origin,reducedMotion:"reduce"});try{const page=await context.newPage();await run({context,page});}finally{await context.close();}});}
+const identity=()=>({email:`requests-browser-${randomBytes(8).toString("hex")}@example.invalid`,password:randomBytes(20).toString("hex"),name:"کاربر درخواست نوایر"});
+async function user(context){const values=identity();const response=await context.request.post("/api/auth/sign-up/email",{headers:{origin},data:{...values,passwordConfirmation:values.password}});expect(response.status()).toBe(200);return {...values,...await response.json()};}
+const payload=(changes={})=>({operationKey:randomUUID(),title:"وب‌سایت فارسی و معرفی خدمات کارگاه",category:"WEBSITE",description:"به یک وب‌سایت خوانا برای معرفی کارگاه و خدمات و نمایش راهنمای سفارش نیاز داریم.",budgetPreference:"UNDECIDED",timelinePreference:"FLEXIBLE",relevantUrl:"",...changes});
+async function fill(page,title=payload().title){await page.locator('input[name="title"]').fill(title);await page.locator('select[name="category"]').selectOption("WEBSITE");await page.locator('textarea[name="description"]').fill(payload().description);}
+const submit=(page)=>page.getByRole("button",{name:"ثبت درخواست",exact:true}).click();
+const confirmed=(page)=>page.getByTestId("request-confirmation");
+async function create(context,body=payload()){const response=await context.request.post("/api/requests",{headers:{origin},data:body});expect(response.status()).toBe(201);return {...await response.json(),payload:body};}
+
+scenario("visitor CTA preserves the form destination through registration and completes real submission/tracking",async({page,context})=>{
+  await page.setViewportSize({width:375,height:1000});await page.goto("/");await page.locator("#start").getByRole("link",{name:"شروع پروژه",exact:true}).click();
+  await expect(page).toHaveURL(/\/login\?next=%2Fdashboard%2Frequests%2Fnew$/);
+  await page.locator(".account-panel").getByRole("link",{name:"ساخت حساب",exact:true}).click();await expect(page).toHaveURL(/\/register\?next=%2Fdashboard%2Frequests%2Fnew$/);
+  const values=identity();await page.locator('input[name="name"]').fill(values.name);await page.locator('input[name="email"]').fill(values.email);await page.locator('input[name="password"]').fill(values.password);await page.locator('input[name="passwordConfirmation"]').fill(values.password);await page.getByRole("button",{name:"ساخت حساب",exact:true}).click();
+  await expect(page.locator('input[name="title"]')).toBeEnabled();await expect(page).toHaveURL(/\/dashboard\/requests\/new\?operation=/);
+  await fill(page);await page.locator('select[name="budgetPreference"]').selectOption("FROM_20_TO_50M");await page.locator('select[name="timelinePreference"]').selectOption("WITHIN_MONTH");await page.locator('input[name="relevantUrl"]').fill("https://example.com/reference");
+  let posts=0;page.on("request",r=>{if(r.method()==="POST"&&r.url().endsWith("/api/requests"))posts++;});
+  await page.getByRole("button",{name:"ثبت درخواست",exact:true}).dblclick();await expect(confirmed(page)).toBeVisible();expect(posts).toBe(1);
+  const id=await page.locator(".request-identifier").textContent();await page.getByRole("link",{name:"جزئیات و پیگیری درخواست",exact:true}).click();
+  await expect(page).toHaveURL(new RegExp(`/dashboard/requests/${id}$`));await expect(page.locator(".request-timeline li")).toHaveCount(1);await expect(page.locator("main")).toContainText("توسط شما");await page.reload();await expect(page.locator(".request-timeline li")).toHaveCount(1);
+  await page.getByRole("link",{name:"بازگشت به درخواست‌ها",exact:true}).click();await expect(page.locator(".request-list-item")).toHaveCount(1);
+  expect((await context.request.get(`/api/requests/${id}`)).status()).toBe(200);
+});
+
+scenario("client and real server validation preserve values, focus fields and announce Persian errors",async({context,page})=>{
+  await user(context);await page.setViewportSize({width:320,height:1000});await page.goto("/dashboard/requests/new");await expect(page.getByRole("button",{name:"ثبت درخواست",exact:true})).toBeEnabled();await submit(page);
+  await expect(page.locator('input[name="title"]')).toBeFocused();await expect(page.locator('input[name="title"]')).toHaveAttribute("aria-invalid","true");
+  expect((await auditPage(page)).violations).toEqual([]);await page.screenshot({path:`${output}/light-validation-320.png`,fullPage:true});
+  await fill(page);await page.route("**/api/requests",route=>route.continue({postData:JSON.stringify({...route.request().postDataJSON(),category:"INVALID"})}));await submit(page);
+  await expect(page.locator('select[name="category"]')).toHaveAttribute("aria-invalid","true");await expect(page.locator('select[name="category"]')).toBeFocused();await expect(page.locator('input[name="title"]')).toHaveValue(payload().title);
+  await page.getByRole("button",{name:"پوستهٔ تیره"}).click();expect((await auditPage(page)).violations).toEqual([]);await page.screenshot({path:`${output}/dark-validation-320.png`,fullPage:true});
+  await page.unroute("**/api/requests");await submit(page);await expect(confirmed(page)).toBeVisible();
+});
+
+scenario("lost response after commit is recovered with the same key, including reload, and a new form stays distinct",async({context,page})=>{
+  const owner=await user(context);await page.goto("/dashboard/requests/new");await fill(page);const key=new URL(page.url()).searchParams.get("operation");let intercepted=false;
+  await page.route("**/api/requests",async route=>{if(!intercepted){intercepted=true;const response=await route.fetch();expect(response.status()).toBe(201);await route.abort("failed");}else await route.continue();});
+  await submit(page);await expect(page.locator(".form-feedback")).toContainText("پاسخ ارسال دریافت نشد");await expect(confirmed(page)).toHaveCount(0);await expect(page.locator('input[name="title"]')).toHaveValue(payload().title);
+  await submit(page);await expect(confirmed(page)).toContainText("درخواست تکراری ساخته نشد");const id=await page.locator(".request-identifier").textContent();await page.reload();await expect(confirmed(page)).toBeVisible();expect(new URL(page.url()).searchParams.get("operation")).toBe(key);
+  expect(await db.projectRequest.count({where:{ownerId:owner.user.id}})).toBe(1);expect(await db.projectRequestStatusHistory.count({where:{requestId:id}})).toBe(1);
+  await page.getByRole("link",{name:"ثبت یک درخواست تازه",exact:true}).click();await expect(page.locator('input[name="title"]')).toBeEnabled();expect(new URL(page.url()).searchParams.get("operation")).not.toBe(key);
+  await fill(page);await submit(page);await expect(confirmed(page)).toBeVisible();expect(await db.projectRequest.count({where:{ownerId:owner.user.id}})).toBe(2);
+});
+
+scenario("owned lists paginate/filter, summary is real, and filtered empty states remain useful",async({context,page})=>{
+  const owner=await user(context);const items=[];
+  for(let i=0;i<12;i++){await db.rateLimit.deleteMany();items.push(await create(context,payload({title:`درخواست واقعی آزمون صفحه‌بندی ${i}`})));}
+  // Explicit isolated fixture transition, not an implemented administrator workflow.
+  await db.$transaction(async tx=>{await tx.projectRequest.update({where:{id:items[0].id},data:{status:"REVIEWING"}});await tx.projectRequestStatusHistory.create({data:{requestId:items[0].id,actorId:owner.user.id,fromStatus:"NEW",toStatus:"REVIEWING"}});});
+  await page.goto("/dashboard/requests");await expect(page.locator(".request-list-item")).toHaveCount(10);await page.getByRole("link",{name:"صفحهٔ بعد",exact:true}).click();await expect(page.locator(".request-list-item")).toHaveCount(2);
+  await page.locator('select[name="status"]').selectOption("REVIEWING");await page.getByRole("button",{name:"اعمال فیلتر",exact:true}).click();await expect(page.locator(".request-list-item")).toHaveCount(1);await expect(page.locator(".request-status")).toContainText("در حال بررسی");
+  await page.locator('select[name="status"]').selectOption("DECLINED");await page.getByRole("button",{name:"اعمال فیلتر",exact:true}).click();await expect(page.locator(".request-empty")).toContainText("پیدا نشد");
+  await page.goto("/dashboard");await expect(page.locator("main")).toContainText("۱۲ درخواست ثبت‌شده");await expect(page.locator(".request-list-item")).toHaveCount(3);
+});
+
+scenario("cross-account detail and forged browser session do not reveal request content",async({context,page})=>{
+  await user(context);const saved=await create(context,payload({title:"عنوان خصوصی و ویژهٔ حساب اول"}));await context.clearCookies();await user(context);
+  expect((await context.request.get(`/api/requests/${saved.id}`)).status()).toBe(404);await page.goto(`/dashboard/requests/${saved.id}`);await expect(page.locator("main")).not.toContainText("عنوان خصوصی و ویژهٔ حساب اول");await expect(page.locator("body")).toContainText("این صفحه پیدا نشد");
+  await context.clearCookies();await context.addCookies([{name:"novair.session_token",value:"forged",url:origin}]);await page.goto("/dashboard/requests/new");await expect(page).toHaveURL(/\/login\?next=/);
+});
+
+scenario("expired session keeps the open draft and real new-tab reauthentication allows safe retry",async({context,page})=>{
+  const owner=await user(context);await page.goto("/dashboard/requests/new");await fill(page);
+  await db.session.updateMany({where:{userId:owner.user.id},data:{expiresAt:new Date(Date.now()-1000)}});await submit(page);
+  const link=page.getByRole("link",{name:"ورود دوباره در زبانهٔ جدید",exact:true});await expect(link).toBeVisible();await expect(page.locator('input[name="title"]')).toHaveValue(payload().title);
+  const popupPromise=context.waitForEvent("page");await link.click();const popup=await popupPromise;await popup.waitForLoadState();await popup.locator('input[name="email"]').fill(owner.email);await popup.locator('input[name="password"]').fill(owner.password);await popup.getByRole("button",{name:"ورود به حساب",exact:true}).click();await expect(popup.locator('input[name="title"]')).toBeEnabled();
+  await expect(page.locator('input[name="title"]')).toHaveValue(payload().title);await page.getByRole("button",{name:"بررسی نتیجهٔ ثبت",exact:true}).click();await expect(page.getByRole("button",{name:"ثبت درخواست",exact:true})).toBeEnabled();await submit(page);await expect(confirmed(page)).toBeVisible();expect(await db.projectRequest.count({where:{ownerId:owner.user.id}})).toBe(1);
+});
+
+scenario("explicit logout in another tab clears private draft access instead of treating it as expiry",async({context,page})=>{
+  await user(context);await page.goto("/dashboard/requests/new");await fill(page);
+  const other=await context.newPage();await other.goto("/dashboard");await other.locator(".account-menu summary").click();await other.getByRole("button",{name:"خروج از حساب",exact:true}).click();await expect(other).toHaveURL(/\/login\?notice=signed-out$/);
+  await expect(page).toHaveURL(/\/login\?next=/);await expect(page.locator(".request-form")).toHaveCount(0);expect((await context.request.get("/api/requests")).status()).toBe(401);
+});
+
+scenario("real database failure displays safe feedback without losing the draft or creating optimistic success",async({context,page})=>{
+  const owner=await user(context);await page.goto("/dashboard/requests/new");await fill(page);
+  await db.$executeRawUnsafe("RENAME TABLE RateLimit TO RateLimit_browser_request_failure");
+  try{await submit(page);await expect(page.locator(".form-feedback")).toContainText("سرویس درخواست موقتاً");await expect(page.locator('input[name="title"]')).toHaveValue(payload().title);await expect(confirmed(page)).toHaveCount(0);expect(await db.projectRequest.count({where:{ownerId:owner.user.id}})).toBe(0);}
+  finally{await db.$executeRawUnsafe("RENAME TABLE RateLimit_browser_request_failure TO RateLimit");}
+  await submit(page);await expect(confirmed(page)).toBeVisible();expect(await db.projectRequest.count({where:{ownerId:owner.user.id}})).toBe(1);
+});
+
+scenario("unavailable list storage renders the safe dashboard error boundary and its retry recovers",async({context,page})=>{
+  await user(context);await create(context);await db.$executeRawUnsafe("RENAME TABLE ProjectRequest TO ProjectRequest_browser_read_failure");
+  try{await page.goto("/dashboard/requests");await expect(page.locator("main")).toContainText("دریافت اطلاعات ممکن نشد");await expect(page.locator("main")).not.toContainText("Prisma");await expect(page.getByRole("button",{name:"تلاش دوباره",exact:true})).toBeVisible();}
+  finally{await db.$executeRawUnsafe("RENAME TABLE ProjectRequest_browser_read_failure TO ProjectRequest");}
+  await page.getByRole("button",{name:"تلاش دوباره",exact:true}).click();await expect(page.locator(".request-list-item")).toHaveCount(1);
+});
+
+scenario("ADMIN project CTA stays in its authorized area and cannot submit a customer request",async({context,page})=>{
+  const response=await context.request.post("/api/auth/sign-in/email",{headers:{origin},data:{email:process.env.ADMIN_EMAIL,password:process.env.ADMIN_PASSWORD}});expect(response.status()).toBe(200);
+  await page.goto("/");await page.locator("#start").getByRole("link",{name:"شروع پروژه",exact:true}).click();await expect(page).toHaveURL(/\/admin$/);
+  expect((await context.request.post("/api/requests",{headers:{origin},data:payload()})).status()).toBe(403);
+});
+
+scenario("real rate limit is announced in the form and a fresh operation cannot bypass it",async({context,page})=>{
+  const owner=await user(context);for(let i=0;i<5;i++)await create(context);
+  await page.setViewportSize({width:375,height:1000});await page.goto("/dashboard/requests/new");await fill(page);await submit(page);await expect(page.locator(".form-feedback")).toContainText("تعداد درخواست‌ها زیاد است");await expect(confirmed(page)).toHaveCount(0);await expect(page.locator('input[name="title"]')).toHaveValue(payload().title);
+  expect(await db.projectRequest.count({where:{ownerId:owner.user.id}})).toBe(5);
+  expect((await auditPage(page)).violations).toEqual([]);await page.screenshot({path:`${output}/light-rate-limit-375.png`,fullPage:true});
+});
+
+for(const theme of ["light","dark"]){scenario(`request empty/form/confirmation/list/detail/dashboard at seven widths, 200% text and axe in ${theme}`,async({context,page})=>{
+  await user(context);await page.addInitScript(value=>localStorage.setItem("novair-theme",value),theme);
+  const widths=[320,375,430,768,1024,1440,1920];
+  async function inspect(name,ready){
+    await ready();await page.evaluate(()=>document.fonts.ready);await expect(page.locator("html")).toHaveAttribute("dir","rtl");await expect(page.locator("html")).toHaveAttribute("data-theme",theme);
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+    const width=page.viewportSize().width;
+    if([375,1440].includes(width)){expect((await auditPage(page)).violations).toEqual([]);await page.screenshot({path:`${output}/${theme}-${name}-${width}.png`,fullPage:true});}
+    await page.evaluate(()=>{document.documentElement.style.fontSize="200%";});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+    if(width===375){await page.locator("main").scrollIntoViewIfNeeded();await page.screenshot({path:`${output}/${theme}-${name}-text200.png`,fullPage:false});}
+    await page.evaluate(()=>{document.documentElement.style.fontSize="";});
+  }
+  for(const width of widths){await page.setViewportSize({width,height:1000});await page.goto("/dashboard/requests");await inspect("empty",()=>page.locator(".request-empty").waitFor());}
+  for(const width of widths){await page.setViewportSize({width,height:1000});await page.goto("/dashboard/requests/new");await inspect("form",()=>page.locator('input[name="title"]:enabled').waitFor());}
+  const longTitle="درخواست طراحی وب‌سایت با توضیحات بلند فارسی برای بررسی خوانایی و نمایش درست اطلاعات در صفحه‌های کوچک";await fill(page,longTitle);await submit(page);await expect(confirmed(page)).toBeVisible();const confirmationUrl=page.url();const id=await page.locator(".request-identifier").textContent();
+  for(const width of widths){await page.setViewportSize({width,height:1000});await page.goto(confirmationUrl);await inspect("confirmation",()=>confirmed(page).waitFor());}
+  for(const [name,path,selector] of [["detail",`/dashboard/requests/${id}`,".request-timeline"],["list","/dashboard/requests",".request-list-item"],["dashboard","/dashboard",".request-summary-statuses"]])for(const width of widths){await page.setViewportSize({width,height:1000});await page.goto(path);await inspect(name,()=>page.locator(selector).first().waitFor());}
+});}

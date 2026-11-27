@@ -1,0 +1,3 @@
+# Prompt 04 source snapshots
+
+These are verbatim copies of the active Prompt 04 tests before request-availability assertions changed in Prompt 05. They use `.txt` suffixes so archival imports are not typechecked or accidentally executed from a different directory. Current tests remain under `tests/unit`, `tests/shared`, `tests/http`, `tests/integration` and `tests/cdp`; their security assertions are preserved. Only obsolete feature-availability expectations and phase artifact destinations change for the implemented request workflow. Historical Prompt 04 results/artifacts remain separately preserved.

@@ -1,0 +1,14 @@
+node_modules
+.next
+.local-tools
+.npm-cache
+.data
+.env*
+test-results
+playwright-report
+package-lock.json
+next-env.d.ts
+public/fonts
+*.tsbuildinfo
+prisma/migrations
+

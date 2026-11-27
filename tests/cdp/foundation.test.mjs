@@ -1,0 +1,98 @@
+import { before, after, test } from "node:test";
+import { mkdir, writeFile } from "node:fs/promises";
+import { openBrowser } from "../shared/open-browser.mjs";
+import { browserCases } from "../shared/browser-cases.ts";
+const testOrigin = process.env.NOVAIR_TEST_ORIGIN || "http://127.0.0.1:3000";
+
+let browser;
+before(async () => {
+  browser = await openBrowser();
+  console.log(`Connected isolated Playwright checks to Chromium ${browser.version()}.`);
+});
+after(async () => { await browser?.close(); });
+
+for (const scenario of browserCases) {
+  test(scenario.name, async () => {
+    const context = await browser.newContext({ baseURL: testOrigin });
+    try {
+      const page = await context.newPage();
+      await scenario.run({ page, context, request: context.request });
+    } finally { await context.close(); }
+  });
+}
+
+test("capture both themes at all seven viewport widths for visual review", async () => {
+  const output = `${process.env.NOVAIR_TEST_OUTPUT || "test-results/prompt04-auth"}/regression`;
+  await mkdir(output, { recursive: true });
+  const context = await browser.newContext({ baseURL: testOrigin, reducedMotion: "reduce" });
+  const measurements = [];
+  try {
+    const page = await context.newPage();
+    for (const theme of ["light", "dark"]) {
+      await page.goto("/");
+      await page.evaluate((value) => localStorage.setItem("novair-theme", value), theme);
+      for (const width of [320, 375, 430, 768, 1024, 1440, 1920]) {
+        await page.setViewportSize({ width, height: 1000 });
+        await page.goto("/");
+        // Dynamic Server Components can still be streaming after navigation commits.
+        // Never accept a screenshot of the global loading boundary as page verification.
+        await page.locator("#start h2").waitFor();
+        await page.waitForFunction(() => document.querySelector(".faq-trigger")?.disabled === false);
+        await page.evaluate(() => document.fonts.ready);
+        await page.screenshot({ path: `${output}/${theme}-${width}.png`, fullPage: true });
+        if ([375, 1440].includes(width)) {
+          for (const section of ["capabilities", "faq", "start"]) {
+            await page.locator(`#${section}`).screenshot({ path: `${output}/${theme}-${width}-${section}.png` });
+          }
+          if (width === 375) {
+            await page.setViewportSize({ width, height: 2400 });
+            await page.evaluate(() => { document.documentElement.style.fontSize = "200%"; });
+            await page.locator("#start").screenshot({ path: `${output}/${theme}-${width}-text200.png` });
+            await page.evaluate(() => { document.documentElement.style.fontSize = ""; });
+            await page.setViewportSize({ width, height: 1000 });
+          }
+          await page.evaluate(() => window.scrollTo(0, 0));
+        }
+        measurements.push(await page.evaluate(() => ({
+          width: innerWidth, theme: document.documentElement.dataset.theme,
+          scrollWidth: document.documentElement.scrollWidth,
+          heading: document.querySelector("h1").getBoundingClientRect().toJSON(),
+          artwork: document.querySelector(".hero-workshop").getBoundingClientRect().toJSON(),
+          resources: performance.getEntriesByType("resource").map((entry) => ({
+            name: entry.name.replace(location.origin, ""), bytes: entry.transferSize,
+          })),
+        })));
+      }
+    }
+    await writeFile(`${output}/measurements.json`, JSON.stringify(measurements, null, 2));
+    console.log(`Saved 14 full-page and 14 section/text-zoom screenshots plus measurements to ${output}.`);
+  } finally { await context.close(); }
+});
+
+test("capture working account forms in both themes", async () => {
+  const output = `${process.env.NOVAIR_TEST_OUTPUT || "test-results/prompt04-auth"}/regression`;
+  await mkdir(output, { recursive: true });
+  const context = await browser.newContext({ baseURL: testOrigin, reducedMotion: "reduce" });
+  try {
+    const page = await context.newPage();
+    for (const theme of ["light", "dark"]) {
+      await page.goto("/login");
+      await page.evaluate((value) => localStorage.setItem("novair-theme", value), theme);
+      for (const route of ["login", "register"]) {
+        for (const width of [375, 1440]) {
+          await page.setViewportSize({ width, height: 1000 });
+          await page.goto(`/${route}`);
+          await page.locator(".account-panel").waitFor();
+          await page.evaluate(() => document.fonts.ready);
+          await page.screenshot({ path: `${output}/${theme}-${route}-${width}.png`, fullPage: true });
+          if (width === 375) {
+            await page.setViewportSize({ width, height: 2400 });
+            await page.evaluate(() => { document.documentElement.style.fontSize = "200%"; });
+            await page.locator(".account-panel").screenshot({ path: `${output}/${theme}-${route}-text200.png` });
+          }
+        }
+      }
+    }
+    console.log("Saved 8 account-form screenshots and 4 text-size crops for actual visual review.");
+  } finally { await context.close(); }
+});

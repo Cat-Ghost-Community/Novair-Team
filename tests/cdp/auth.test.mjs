@@ -1,0 +1,206 @@
+import { before, after, test } from "node:test";
+import { mkdir } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { expect } from "@playwright/test";
+import { openBrowser } from "../shared/open-browser.mjs";
+import { auditPage } from "../shared/accessibility.ts";
+
+const origin = process.env.NOVAIR_TEST_ORIGIN;
+if (origin !== "http://127.0.0.1:3100" || !process.env.ADMIN_PASSWORD) throw new Error("Use the owned isolated auth verification context.");
+let browser;
+const output = `${process.env.NOVAIR_TEST_OUTPUT || "test-results/prompt04-auth"}/browser`;
+before(async () => {
+  browser = await openBrowser();
+  await mkdir(output, { recursive: true });
+  console.log(`Real authentication browser checks in isolated contexts; Chromium ${browser.version()}.`);
+});
+after(async () => { await browser?.close(); });
+function scenario(name, run) {
+  test(name, async () => {
+    const context = await browser.newContext({ baseURL: origin, reducedMotion: "reduce" });
+    try { const page = await context.newPage(); await run({ context, page }); }
+    finally { await context.close(); }
+  });
+}
+function credentials() { return { email: `browser-${randomBytes(7).toString("hex")}@example.invalid`, password: randomBytes(18).toString("hex"), name: "کاربر مرورگر نوایر" }; }
+async function createUser(context) {
+  const values = credentials();
+  const response = await context.request.post("/api/auth/sign-up/email", { headers: { origin }, data: { ...values, passwordConfirmation: values.password } });
+  expect(response.status()).toBe(200);
+  return values;
+}
+async function signIn(page, email, password) {
+  await page.locator('input[name="email"]').fill(email);
+  await page.locator('input[name="password"]').fill(password);
+  await page.getByRole("button", { name: "ورود به حساب", exact: true }).click();
+}
+async function logout(page) {
+  await page.locator(".account-menu summary").click();
+  await page.getByRole("button", { name: "خروج از حساب", exact: true }).click();
+  await expect(page).toHaveURL(/\/login\?notice=signed-out$/);
+}
+
+scenario("registration, password visibility, duplicate-submit prevention and reload persistence", async ({ page, context }) => {
+  await page.setViewportSize({ width: 375, height: 900 });
+  const values = credentials(); let submissions = 0;
+  page.on("request", (request) => { if (request.url().endsWith("/api/auth/sign-up/email")) submissions++; });
+  await page.goto("/register");
+  await page.locator('input[name="name"]').fill(values.name);
+  await page.locator('input[name="email"]').fill(values.email);
+  await page.locator('input[name="password"]').fill(values.password);
+  await page.locator('input[name="passwordConfirmation"]').fill(values.password);
+  const reveal = page.getByRole("button", { name: "نمایش رمز عبور", exact: true });
+  await reveal.focus(); await page.keyboard.press("Enter");
+  await expect(page.locator('input[name="password"]')).toHaveAttribute("type", "text");
+  await page.getByRole("button", { name: "پنهان‌کردن رمز عبور", exact: true }).click();
+  await expect(page.locator('input[name="password"]')).toHaveAttribute("type", "password");
+  await page.getByRole("button", { name: "ساخت حساب", exact: true }).dblclick();
+  await expect(page).toHaveURL(/\/dashboard$/);
+  expect(submissions).toBe(1);
+  await expect(page.locator("main")).toContainText(values.name);
+  await page.reload();
+  await expect(page.locator("h1")).toHaveText("پیشخوان تو");
+  expect(await page.evaluate(() => document.cookie.includes("novair.session_token"))).toBe(false);
+  expect((await context.cookies()).some((cookie) => cookie.name === "novair.session_token" && cookie.httpOnly && cookie.sameSite === "Lax")).toBe(true);
+  expect(await page.evaluate(() => Object.keys(localStorage).some((key) => /password|session_token/.test(key)))).toBe(false);
+  const session = await (await context.request.get("/api/auth/get-session")).json();
+  expect(session.user.email).toBe(values.email); expect("token" in session).toBe(false);
+});
+
+scenario("client field errors and server credential errors are keyboard-accessible Persian feedback", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 900 });
+  await page.goto("/login");
+  await page.getByRole("button", { name: "ورود به حساب", exact: true }).click();
+  await expect(page.locator('input[name="email"]')).toHaveAttribute("aria-invalid", "true");
+  await expect(page.locator('input[name="email"]')).toBeFocused();
+  await expect(page.locator(".field-error").first()).toContainText("ایمیل");
+  await signIn(page, credentials().email, credentials().password);
+  await expect(page.locator(".form-feedback")).toContainText("ایمیل یا رمز عبور صحیح نیست");
+  await expect(page.locator(".form-feedback")).toBeFocused();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect((await auditPage(page)).violations).toEqual([]);
+  await page.screenshot({ path: `${output}/light-validation-320.png`, fullPage: true });
+  await page.getByRole("button", { name: "پوستهٔ تیره" }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  expect((await auditPage(page)).violations).toEqual([]);
+  await page.screenshot({ path: `${output}/dark-validation-320.png`, fullPage: true });
+});
+
+scenario("forms stay disabled before hydration and can never submit passwords with GET", async ({ page }) => {
+  let release = () => {}; const gate = new Promise((resolve) => { release = resolve; });
+  await page.route("**/_next/static/chunks/**", async (route) => { await gate; await route.continue(); });
+  try {
+    await page.goto("/login", { waitUntil: "commit" });
+    await expect(page.locator("form")).toHaveAttribute("method", "post");
+    await expect(page.locator('input[name="password"]')).toBeDisabled();
+    await expect(page.getByRole("button", { name: "ورود به حساب", exact: true })).toBeDisabled();
+    release(); await expect(page.locator('input[name="password"]')).toBeEnabled();
+  } finally { release(); }
+});
+
+scenario("real login honors dark theme and rejects an external post-login destination", async ({ page, context }) => {
+  const user = await createUser(context); await context.clearCookies();
+  await page.addInitScript(() => localStorage.setItem("novair-theme", "dark"));
+  await page.goto("/login?next=https%3A%2F%2Fexample.invalid");
+  await signIn(page, user.email, user.password);
+  await expect(page).toHaveURL(/\/dashboard$/);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.reload(); await expect(page.locator("main")).toContainText(user.email);
+  await expect(page.locator("header .account-link")).toHaveAttribute("href", "/dashboard");
+});
+
+scenario("password change rotates authentication and works after logout with the new credential", async ({ page, context }) => {
+  const user = await createUser(context); const changed = randomBytes(20).toString("hex");
+  await page.goto("/dashboard/profile");
+  await page.locator('input[name="currentPassword"]').fill(user.password);
+  await page.locator('input[name="newPassword"]').fill(changed);
+  await page.locator('input[name="passwordConfirmation"]').fill(changed);
+  await page.getByRole("button", { name: "تغییر رمز عبور", exact: true }).click();
+  await expect(page.getByRole("status").filter({ hasText: "رمز عبور تغییر کرد" })).toBeVisible();
+  await page.reload(); await expect(page.locator("h1")).toHaveText("حساب و امنیت");
+  await logout(page);
+  await signIn(page, user.email, user.password);
+  await expect(page.locator(".form-feedback")).toContainText("ایمیل یا رمز عبور صحیح نیست");
+  await signIn(page, user.email, changed); await expect(page).toHaveURL(/\/dashboard$/);
+});
+
+scenario("logout, account-menu Escape and browser back/forward cannot recover private access", async ({ page, context }) => {
+  await createUser(context);
+  await page.goto("/dashboard"); await page.goto("/dashboard/profile");
+  const menu = page.locator(".account-menu");
+  await menu.locator("summary").click(); await page.keyboard.press("Escape");
+  expect(await menu.evaluate((element) => element.open)).toBe(false);
+  await expect(menu.locator("summary")).toBeFocused();
+  await logout(page);
+  await page.goBack(); await expect(page).toHaveURL(/\/login(?:\?|$)/);
+  await page.reload(); await expect(page.locator("h1")).toHaveText("ورود به نوایر");
+  expect((await context.request.get("/api/account")).status()).toBe(401);
+});
+
+scenario("USER is redirected from administration and the project CTA opens its authorized form", async ({ page, context }) => {
+  await createUser(context);
+  await page.goto("/admin"); await expect(page).toHaveURL(/\/dashboard\?notice=forbidden$/);
+  expect((await context.request.get("/api/admin/overview")).status()).toBe(403);
+  await page.locator("header").getByRole("link", { name: "شروع پروژه", exact: true }).click();
+  await expect(page).toHaveURL(/\/dashboard\/requests\/new(?:\?|$)/);
+  await expect(page.locator("main")).toContainText("درخواست تازه");
+  await expect(page.locator("main form")).toHaveCount(1);
+});
+
+scenario("legitimately bootstrapped administrator logs in and sees only implemented management data", async ({ page }) => {
+  await page.goto("/login"); await signIn(page, process.env.ADMIN_EMAIL, process.env.ADMIN_PASSWORD);
+  await expect(page).toHaveURL(/\/admin$/);
+  await expect(page.locator("h1")).toHaveText("پیشخوان مدیریت");
+  await expect(page.locator("main")).toContainText("حساب‌های فعال");
+  await page.getByRole("navigation", { name: "ناوبری مدیریت" }).getByRole("link", { name: "کاربران", exact: true }).click();
+  await expect(page.locator("main")).toContainText("ابزار مدیریت این بخش هنوز فعال نیست");
+  await page.goto("/dashboard"); await expect(page).toHaveURL(/\/admin$/);
+  await logout(page);
+});
+
+for (const theme of ["light", "dark"]) {
+  scenario(`authenticated dashboards, forms, text zoom, RTL and axe across seven widths in ${theme}`, async ({ page, context }) => {
+    await page.addInitScript((value) => localStorage.setItem("novair-theme", value), theme);
+    const user = await createUser(context);
+    for (const path of ["/dashboard", "/dashboard/profile"]) {
+      for (const width of [320, 375, 430, 768, 1024, 1440, 1920]) {
+        await page.setViewportSize({ width, height: 1000 }); await page.goto(path);
+        await page.evaluate(() => document.fonts.ready);
+        await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+        await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
+        await expect(page.locator("main")).toContainText(user.email);
+        if (path.endsWith("profile")) await expect(page.locator('input[name="currentPassword"]')).toBeEnabled();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        if ([375,1440].includes(width)) {
+          expect((await auditPage(page)).violations).toEqual([]);
+          await page.screenshot({ path: `${output}/${theme}-${path.split('/').pop()}-${width}.png`, fullPage: true });
+        }
+        await page.evaluate(() => { document.documentElement.style.fontSize = "200%"; });
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        if (width === 375 && path.endsWith("profile")) {
+          await page.setViewportSize({ width, height: 4000 });
+          await page.locator(".dashboard-main").screenshot({ path: `${output}/${theme}-profile-text200.png` });
+        }
+      }
+    }
+    await context.request.post("/api/auth/sign-out", { headers: { origin }, data: {} });
+    const administrator = await context.request.post("/api/auth/sign-in/email", { headers: { origin }, data: { email: process.env.ADMIN_EMAIL, password: process.env.ADMIN_PASSWORD } });
+    expect(administrator.status()).toBe(200);
+    for (const width of [320,375,430,768,1024,1440,1920]) {
+      await page.setViewportSize({ width, height: 1000 }); await page.goto("/admin");
+      await page.evaluate(() => document.fonts.ready);
+      await expect(page.locator('input[name="currentPassword"]')).toBeEnabled();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      if ([375,1440].includes(width)) {
+        expect((await auditPage(page)).violations).toEqual([]);
+        await page.screenshot({ path: `${output}/${theme}-admin-${width}.png`, fullPage: true });
+      }
+      await page.evaluate(() => { document.documentElement.style.fontSize = "200%"; });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      if (width === 375) {
+        await page.setViewportSize({ width, height: 4000 });
+        await page.locator(".dashboard-main").screenshot({ path: `${output}/${theme}-admin-text200.png` });
+      }
+    }
+  });
+}

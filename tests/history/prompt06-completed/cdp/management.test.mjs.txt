@@ -1,0 +1,361 @@
+import { before, beforeEach, after, test } from 'node:test';
+import { readFile, mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { randomUUID, randomBytes } from 'node:crypto';
+import { PrismaClient } from '@prisma/client';
+import { chromium, expect } from '@playwright/test';
+import { auditPage } from '../shared/accessibility.ts';
+import { bootstrapAdministrator } from '../../src/server/auth/bootstrap.ts';
+const fixture = JSON.parse(await readFile('.local-tools/auth-test-context.json', 'utf8'));
+const origin = process.env.NOVAIR_TEST_ORIGIN;
+if (origin !== 'http://127.0.0.1:3100' || new URL(process.env.DATABASE_URL).pathname !== `/${fixture.name}` || !/^novair_auth_test_[a-f0-9]{12}$/.test(fixture.name))
+    throw Error('Owned management fixture required.');
+const db = new PrismaClient();
+let browser, colleague;
+let axeCount = 0;
+const output = 'test-results/prompt06/management';
+const cookieOf = r => r.headers.getSetCookie().map(x => x.split(';')[0]).filter(x => !x.endsWith('=')).join('; ');
+const api = (path, cookie, body) => fetch(origin + path, { method: body === undefined ? 'GET' : 'POST', headers: { origin, cookie, ...(body === undefined ? {} : { 'content-type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+async function customerRequest(title = 'درخواست واقعی بررسی پروژه و ساخت ابزار فارسی') {
+    const values = { email: `management-ui-${randomBytes(6).toString('hex')}@example.invalid`, password: randomBytes(20).toString('hex'), name: 'مشتری آزمون مدیریت' };
+    const r = await api('/api/auth/sign-up/email', '', { ...values, passwordConfirmation: values.password });
+    expect(r.status).toBe(200);
+    const cookie = cookieOf(r);
+    const req = await api('/api/requests', cookie, { operationKey: randomUUID(), title, category: 'DASHBOARD', description: 'برای مدیریت اطلاعات و سفارش‌های کارگاه به یک پنل خوانا و فارسی نیاز دارم.', budgetPreference: 'UNDECIDED' });
+    expect(req.status).toBe(201);
+    return { ...values, cookie, id: (await req.json()).id };
+}
+async function adminLogin(context, actor = { email: process.env.ADMIN_EMAIL, password: process.env.ADMIN_PASSWORD }) { const r = await context.request.post('/api/auth/sign-in/email', { headers: { origin }, data: { email: actor.email, password: actor.password } }); expect(r.status()).toBe(200); }
+async function acceptedProject(context) {
+    const owner = await customerRequest();
+    for (const [expectedVersion, toStatus] of [[0, 'REVIEWING'], [1, 'ACCEPTED']]) {
+        const r = await context.request.post(`/api/admin/requests/${owner.id}/review`, { headers: { origin }, data: { operationKey: randomUUID(), expectedVersion, toStatus } });
+        expect(r.status()).toBe(200);
+    }
+    const r = await context.request.post(`/api/admin/requests/${owner.id}/convert`, { headers: { origin }, data: { operationKey: randomUUID(), expectedVersion: 2 } });
+    expect(r.status()).toBe(200);
+    return { ...owner, projectId: (await r.json()).result.id };
+}
+async function committed(page) { await expect(page.locator('.management-result')).toBeVisible(); }
+async function send(page, action, confirm = true) {
+    const loaded = page.waitForEvent('domcontentloaded');
+    await page.locator(`#management-${action}`).locator('button[type="submit"]').click();
+    if (confirm) {
+        const dialog = page.getByRole('dialog');
+        await expect(dialog).toBeVisible();
+        await dialog.getByRole('button', { name: 'تأیید و ثبت', exact: true }).click();
+    }
+    await loaded;
+    await committed(page);
+}
+async function audit(page) { const result = await auditPage(page); expect(result.violations).toEqual([]); axeCount++; }
+before(async () => {
+    expect((await db.siteSetting.findUnique({ where: { key: '__novair_auth_test' } })).value.nonce).toBe(fixture.nonce);
+    const [port, path] = (await readFile(join(process.env.LOCALAPPDATA, 'Google/Chrome/User Data/DevToolsActivePort'), 'utf8')).trim().split(/\r?\n/);
+    const endpoint = process.env.NOVAIR_CDP_URL || `ws://127.0.0.1:${port}${path}`;
+    const url = new URL(endpoint);
+    if (!['ws:', 'http:'].includes(url.protocol) || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname))
+        throw Error('Local CDP required.');
+    browser = await chromium.connectOverCDP(endpoint, { timeout: 10000, noDefaults: true });
+    await mkdir(output, { recursive: true });
+    colleague = { email: `ui-colleague-${randomBytes(5).toString('hex')}@example.invalid`, password: randomBytes(20).toString('hex') };
+    await bootstrapAdministrator(db, { ...colleague, name: 'مدیر همکار مرورگر' });
+    colleague.id = (await db.user.findUnique({ where: { email: colleague.email } })).id;
+    console.log(`Management browser workflows on Chromium ${browser.version()}.`);
+});
+beforeEach(async () => { await db.rateLimit.deleteMany(); });
+after(async () => { console.log(`Completed ${axeCount} management axe configurations.`); await browser?.close(); await db.$disconnect(); });
+function scenario(name, run) {
+    test(name, async () => {
+        const context = await browser.newContext({ baseURL: origin, reducedMotion: 'reduce' });
+        try {
+            const page = await context.newPage();
+            await run({ context, page });
+        }
+        finally {
+            await context.close();
+        }
+    });
+}
+scenario('real admin review, dialog cancellation/focus, private note, acceptance and conversion work end to end', async ({ page }) => {
+    const owner = await customerRequest();
+    await page.goto('/login');
+    await page.locator('input[name="email"]').fill(process.env.ADMIN_EMAIL);
+    await page.locator('input[name="password"]').fill(process.env.ADMIN_PASSWORD);
+    await page.getByRole('button', { name: 'ورود به حساب', exact: true }).click();
+    await expect(page).toHaveURL(/\/admin$/);
+    await page.getByRole('navigation', { name: 'ناوبری مدیریت' }).getByRole('link', { name: 'درخواست‌ها', exact: true }).click();
+    await page.getByLabel('جست‌وجو', { exact: true }).fill(owner.id);
+    await page.getByRole('button', { name: 'اعمال فیلتر و جست‌وجو' }).click();
+    await expect(page.locator('.management-requests li')).toHaveCount(1);
+    await page.getByRole('link', { name: 'جزئیات و بررسی', exact: true }).click();
+    const trigger = page.locator('#management-review button[type="submit"]');
+    await trigger.click();
+    await expect(page.getByRole('button', { name: 'بازگشت بدون تغییر', exact: true })).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(trigger).toBeFocused();
+    expect((await db.projectRequest.findUnique({ where: { id: owner.id } })).status).toBe('NEW');
+    await send(page, 'review');
+    expect((await db.projectRequest.findUnique({ where: { id: owner.id } })).status).toBe('REVIEWING');
+    const note = `PRIVATE-BROWSER-${randomUUID()}`;
+    await page.locator('#management-request-note textarea').fill(note);
+    await send(page, 'request-note', false);
+    await expect(page.locator('.management-notes')).toContainText(note);
+    await page.locator('#management-review select').selectOption('ACCEPTED');
+    await send(page, 'review');
+    expect(await db.project.count({ where: { requestId: owner.id } })).toBe(0);
+    await expect(page.locator('main')).toContainText('در انتظار ایجاد پروژه');
+    await send(page, 'convert');
+    await expect(page).toHaveURL(/\/admin\/projects\/[a-z0-9-]+\?operation=/);
+    const pid = new URL(page.url()).pathname.split('/').pop();
+    expect(await db.project.count({ where: { requestId: owner.id } })).toBe(1);
+    await expect(page.locator('.management-history')).toContainText('برنامه‌ریزی‌شده');
+    const publicData = await (await api(`/api/requests/${owner.id}`, owner.cookie)).text();
+    expect(publicData).not.toContain(note);
+    expect((await db.project.findUnique({ where: { id: pid } })).ownerId).toBe((await db.user.findUnique({ where: { email: owner.email } })).id);
+});
+scenario('decline validates the public reason and shows only that reason to the real customer', async ({ context, page }) => {
+    const owner = await customerRequest();
+    await adminLogin(context);
+    await page.goto(`/admin/requests/${owner.id}`);
+    await page.locator('#management-review select').selectOption('DECLINED');
+    await page.locator('#management-review button[type="submit"]').click();
+    await expect(page.locator('textarea[name="publicExplanation"]')).toBeFocused();
+    await expect(page.locator('textarea[name="publicExplanation"]')).toHaveAttribute('aria-invalid', 'true');
+    await audit(page);
+    const explanation = 'این نیاز در محدودهٔ خدمات کنونی تیم قرار نمی‌گیرد و امکان پذیرش آن وجود ندارد.';
+    const secret = `PRIVATE-DECLINE-${randomUUID()}`;
+    await page.locator('textarea[name="publicExplanation"]').fill(explanation);
+    await page.locator('textarea[name="privateNote"]').fill(secret);
+    await send(page, 'review');
+    await expect(page.locator('#management-review')).toHaveCount(0);
+    await expect(page.locator('.management-notes')).toContainText(secret);
+    const customerContext = await browser.newContext({ baseURL: origin });
+    try {
+        const r = await customerContext.request.post('/api/auth/sign-in/email', { headers: { origin }, data: { email: owner.email, password: owner.password } });
+        expect(r.status()).toBe(200);
+        const cp = await customerContext.newPage();
+        await cp.goto(`/dashboard/requests/${owner.id}`);
+        await expect(cp.locator('main')).toContainText(explanation);
+        expect(await cp.content()).not.toContain(secret);
+    }
+    finally {
+        await customerContext.close();
+    }
+});
+scenario('managed project assignment, scheduling validation, audit and execution lifecycle persist genuinely', async ({ context, page }) => {
+    await adminLogin(context);
+    const owner = await acceptedProject(context);
+    await page.goto(`/admin/projects/${owner.projectId}`);
+    const form = page.locator('#management-project-update');
+    await form.locator('input[name="title"]').fill('پروژهٔ مدیریت سفارش‌های فارسی');
+    await form.locator('select[name="assigneeId"]').selectOption(colleague.id);
+    await form.locator('input[name="plannedStart"]').fill('2027-03-10');
+    await form.locator('input[name="targetCompletion"]').fill('2027-03-01');
+    await form.locator('button[type="submit"]').click();
+    await expect(form.locator('input[name="targetCompletion"]')).toHaveAttribute('aria-invalid', 'true');
+    await form.locator('input[name="targetCompletion"]').fill('2027-04-10');
+    await send(page, 'project-update', false);
+    await expect(page.locator('.account-facts time[datetime="2027-03-10"]')).toBeVisible();
+    await expect(page.locator('.account-facts time[datetime="2027-04-10"]')).toBeVisible();
+    await page.screenshot({path:`${output}/light-project-scheduled.png`,fullPage:true});
+    await expect(page.locator('.management-audit')).toContainText('مدیر همکار مرورگر');
+    expect((await db.project.findUnique({ where: { id: owner.projectId } })).assigneeId).toBe(colleague.id);
+    for (const next of ['IN_PROGRESS', 'ON_HOLD', 'IN_PROGRESS', 'COMPLETED']) {
+        await page.locator('#management-project-status select').selectOption(next);
+        await send(page, 'project-status');
+    }
+    await expect(page.locator('#management-project-status')).toHaveCount(0);
+    await expect(page.locator('#management-project-update')).toHaveCount(0);
+    expect(await db.projectStatusHistory.count({ where: { projectId: owner.projectId } })).toBe(5);
+    await expect(page.locator('.project-status--completed')).toContainText('تکمیل‌شده');
+});
+scenario('two administrator pages receive an honest stale conflict and refresh before a new decision', async ({ context, page }) => {
+    const owner = await customerRequest();
+    await adminLogin(context);
+    await page.goto(`/admin/requests/${owner.id}`);
+    const b = await browser.newContext({ baseURL: origin });
+    try {
+        await adminLogin(b, colleague);
+        const bp = await b.newPage();
+        await bp.goto(`/admin/requests/${owner.id}`);
+        await bp.locator('#management-review button[type="submit"]').click();
+        await send(page, 'review');
+        await bp.getByRole('dialog').getByRole('button', { name: 'تأیید و ثبت', exact: true }).click();
+        await expect(bp.locator('#management-review .form-feedback')).toContainText('اطلاعات تغییر کرده');
+        await expect(bp.locator('.management-result')).toHaveCount(0);
+        await audit(bp);
+        await bp.screenshot({ path: `${output}/light-stale-conflict.png`, fullPage: true });
+        expect(await db.projectRequestStatusHistory.count({ where: { requestId: owner.id } })).toBe(2);
+        await bp.getByRole('button', { name: 'خواندن جزئیات تازه', exact: true }).click();
+        await bp.locator('#management-review select').selectOption('ACCEPTED');
+        await send(bp, 'review');
+        expect((await db.projectRequest.findUnique({ where: { id: owner.id } })).status).toBe('ACCEPTED');
+    }
+    finally {
+        await b.close();
+    }
+});
+scenario('response lost after a real private-note commit recovers the same operation without duplicate notes', async ({ context, page }) => {
+    const owner = await customerRequest();
+    await adminLogin(context);
+    await page.goto(`/admin/requests/${owner.id}`);
+    const canary = `یادداشت شبکه ${randomUUID()}`;
+    await page.locator('#management-request-note textarea').fill(canary);
+    let intercepted = false;
+    await page.route(`**/api/admin/requests/${owner.id}/notes`, async (route) => {
+        if (!intercepted) {
+            intercepted = true;
+            const r = await route.fetch();
+            expect(r.status()).toBe(200);
+            await route.abort('failed');
+        }
+        else
+            await route.continue();
+    });
+    await page.locator('#management-request-note button[type="submit"]').click();
+    await expect(page.locator('#management-request-note .form-feedback')).toContainText('پاسخ عملیات دریافت نشد');
+    await page.locator('#management-request-note').getByRole('button', { name: 'بررسی نتیجهٔ عملیات', exact: true }).click();
+    await committed(page);
+    await page.reload();
+    await committed(page);
+    expect(await db.adminNote.count({ where: { requestId: owner.id } })).toBe(1);
+    await expect(page.locator('.management-notes')).toContainText(canary);
+});
+scenario('a forced conversion-history failure has no partial project and exact retry succeeds', async ({ context, page }) => {
+    await adminLogin(context);
+    const owner = await customerRequest();
+    for (const [expectedVersion, toStatus] of [[0, 'REVIEWING'], [1, 'ACCEPTED']])
+        expect((await context.request.post(`/api/admin/requests/${owner.id}/review`, { headers: { origin }, data: { operationKey: randomUUID(), expectedVersion, toStatus } })).status()).toBe(200);
+    await page.goto(`/admin/requests/${owner.id}`);
+    const rows = await db.projectStatusHistory.findMany({ select: { id: true } });
+    for (const row of rows)
+        if (!/^[a-zA-Z0-9-]{20,36}$/.test(row.id))
+            throw Error('Unexpected fixture identifier');
+    const check = rows.length ? `id IN (${rows.map(r => `'${r.id}'`).join(',')})` : 'id <> id';
+    await db.$executeRawUnsafe(`ALTER TABLE ProjectStatusHistory ADD CONSTRAINT management_browser_failure CHECK (${check})`);
+    try {
+        await page.locator('#management-convert button[type="submit"]').click();
+        await page.getByRole('dialog').getByRole('button', { name: 'تأیید و ثبت', exact: true }).click();
+        await expect(page.locator('#management-convert .form-feedback')).toContainText('سرویس مدیریت موقتاً');
+        expect(await db.project.count({ where: { requestId: owner.id } })).toBe(0);
+        expect((await db.projectRequest.findUnique({ where: { id: owner.id } })).status).toBe('ACCEPTED');
+    }
+    finally {
+        await db.$executeRawUnsafe('ALTER TABLE ProjectStatusHistory DROP CHECK management_browser_failure');
+    }
+    await send(page, 'convert');
+    expect(await db.project.count({ where: { requestId: owner.id } })).toBe(1);
+});
+scenario('concurrent metadata edit preserves unsaved input and rejects stale overwrite', async ({ context, page }) => {
+    await adminLogin(context);
+    const owner = await acceptedProject(context);
+    await page.goto(`/admin/projects/${owner.projectId}`);
+    await page.locator('#management-project-update input[name="title"]').fill('عنوان واردشده از صفحهٔ قدیمی');
+    const d = (await (await context.request.get(`/api/admin/projects/${owner.projectId}`)).json()).project;
+    const r = await context.request.post(`/api/admin/projects/${owner.projectId}/update`, { headers: { origin }, data: { operationKey: randomUUID(), expectedVersion: d.version, title: 'عنوان تازهٔ ثبت‌شده', description: d.description, assigneeId: null, plannedStart: null, targetCompletion: null } });
+    expect(r.status()).toBe(200);
+    await page.locator('#management-project-update button[type="submit"]').click();
+    await expect(page.locator('#management-project-update .form-feedback')).toContainText('اطلاعات تغییر کرده');
+    await expect(page.locator('#management-project-update input[name="title"]')).toHaveValue('عنوان واردشده از صفحهٔ قدیمی');
+    await page.locator('#management-project-update').getByRole('button', { name: 'خواندن جزئیات تازه', exact: true }).click();
+    await expect(page.locator('#management-project-update input[name="title"]')).toHaveValue('عنوان تازهٔ ثبت‌شده');
+});
+scenario('USER and forged cookies cannot enter management or read private operation results', async ({ context, page }) => {
+    const owner = await customerRequest();
+    const r = await context.request.post('/api/auth/sign-in/email', { headers: { origin }, data: { email: owner.email, password: owner.password } });
+    expect(r.status()).toBe(200);
+    await page.goto('/admin/requests');
+    await expect(page).toHaveURL(/\/dashboard\?notice=forbidden$/);
+    expect((await context.request.get(`/api/admin/requests/${owner.id}`)).status()).toBe(403);
+    await context.clearCookies();
+    await context.addCookies([{ name: 'novair.session_token', value: 'forged', url: origin }]);
+    await page.goto('/admin/projects');
+    await expect(page).toHaveURL(/\/login\?next=/);
+    expect((await context.request.get(`/api/admin/operations/${randomUUID()}`)).status()).toBe(401);
+});
+scenario('private notes are plain text and the admin read-error retry fetches fresh state', async ({ context, page }) => {
+    const owner = await customerRequest();
+    await adminLogin(context);
+    await page.goto(`/admin/requests/${owner.id}`);
+    const text = '<img src=x onerror=alert(1)> یادداشت متنی خصوصی';
+    await page.locator('#management-request-note textarea').fill(text);
+    await send(page, 'request-note', false);
+    await expect(page.locator('.management-notes')).toContainText(text);
+    expect(await page.locator('.management-notes img').count()).toBe(0);
+    await audit(page);
+    await db.$executeRawUnsafe('RENAME TABLE ProjectRequest TO ProjectRequest_management_read_failure');
+    try {
+        await page.goto('/admin/requests');
+        await expect(page.locator('main')).toContainText('دریافت اطلاعات مدیریت ممکن نشد');
+        expect(await page.locator('main').textContent()).not.toContain('Prisma');
+    }
+    finally {
+        await db.$executeRawUnsafe('RENAME TABLE ProjectRequest_management_read_failure TO ProjectRequest');
+    }
+    await page.getByRole('button', { name: 'تلاش دوباره', exact: true }).click();
+    await expect(page.locator('.management-requests')).toBeVisible();
+});
+for (const theme of ['light', 'dark'])
+    scenario(`admin request/project workflows at seven widths, 200% text, dialogs and axe in ${theme}`, async ({ context, page }) => {
+        await adminLogin(context);
+        await page.addInitScript(value => localStorage.setItem('novair-theme', value), theme);
+        const owner = await customerRequest('درخواست بررسی جزئیات و ساخت سامانهٔ مدیریت برای خوانایی عنوان‌های بلند فارسی در صفحه‌های کوچک');
+        const converted = await acceptedProject(context);
+        const missing = 'none-' + randomUUID();
+        const views = [['empty-requests', `/admin/requests?q=${missing}`, '.request-empty'], ['empty-projects', `/admin/projects?q=${missing}`, '.request-empty'], ['requests', '/admin/requests', '.management-requests'], ['request', `/admin/requests/${owner.id}`, '#management-review'], ['projects', '/admin/projects', '.management-projects'], ['project', `/admin/projects/${converted.projectId}`, '#management-project-update'], ['overview', '/admin', '.management-metrics']];
+        for (const [name, path, selector] of views)
+            for (const width of [320, 375, 430, 768, 1024, 1440, 1920]) {
+                await page.setViewportSize({ width, height: 1000 });
+                await page.goto(path);
+                await page.locator(selector).waitFor();
+                if (name === 'request')
+                    await expect(page.locator('#management-review button[type="submit"]')).toBeEnabled();
+                if (name === 'project')
+                    await expect(page.locator('#management-project-update input[name="title"]')).toBeEnabled();
+                await page.evaluate(() => document.fonts.ready);
+                await expect(page.locator('html')).toHaveAttribute('dir', 'rtl');
+                await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+                expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+                if ([375, 1440].includes(width)) {
+                    await audit(page);
+                    await page.screenshot({ path: `${output}/${theme}-${name}-${width}.png`, fullPage: true });
+                }
+                await page.evaluate(() => { document.documentElement.style.fontSize = '200%'; });
+                expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+                if (width === 375)
+                    await page.screenshot({ path: `${output}/${theme}-${name}-text200.png`, fullPage: false });
+                await page.evaluate(() => { document.documentElement.style.fontSize = ''; });
+                if (name === 'request' && [375, 1440].includes(width)) {
+                    await page.locator('#management-review select').selectOption('DECLINED');
+                    await page.locator('textarea[name="publicExplanation"]').fill('توضیح روشن و قابل‌نمایش برای مشتری دربارهٔ رد این درخواست.');
+                    await page.locator('#management-review button[type="submit"]').click();
+                    await expect(page.getByRole('button', { name: 'بازگشت بدون تغییر', exact: true })).toBeFocused();
+                    await audit(page);
+                    await page.getByRole('dialog').screenshot({ path: `${output}/${theme}-decline-dialog-${width}.png` });
+                    if (width === 375) {
+                        await page.setViewportSize({ width: 640, height: 320 });
+                        await page.evaluate(() => { document.documentElement.style.fontSize = "200%"; });
+                        const box = await page.getByRole("dialog").boundingBox();
+                        expect(box.x).toBeGreaterThanOrEqual(0);
+                        expect(box.y).toBeGreaterThanOrEqual(0);
+                        expect(box.x + box.width).toBeLessThanOrEqual(640);
+                        expect(box.y + box.height).toBeLessThanOrEqual(320);
+                        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+                        await page.getByRole("button", { name: "بازگشت بدون تغییر", exact: true }).scrollIntoViewIfNeeded();
+                        await page.keyboard.press('Tab');
+                        const confirmButton = page.getByRole('button', { name: 'تأیید و ثبت', exact: true });
+                        await expect(confirmButton).toBeFocused();
+                        const confirmBounds = await confirmButton.boundingBox();
+                        expect(confirmBounds.y).toBeGreaterThanOrEqual(0);
+                        expect(confirmBounds.y + confirmBounds.height).toBeLessThanOrEqual(320);
+                        await audit(page);
+                        await page.screenshot({ path: `${output}/${theme}-dialog-landscape-text200.png` });
+                        await page.evaluate(() => { document.documentElement.style.fontSize = ""; });
+                        await page.setViewportSize({ width, height: 1000 });
+                    }
+                    await page.keyboard.press('Escape');
+                    await expect(page.locator('#management-review button[type="submit"]')).toBeFocused();
+                }
+            }
+    });
