@@ -8,6 +8,7 @@ NovAir is the Persian, right-to-left website and customer portal for a two-perso
 - [Run locally](#run-locally)
 - [Install on Linux staging](#install-on-linux-staging)
 - [One-command staging install](#one-command-staging-install)
+  - [Public repository shortcut](#public-repository)
 - [Configure Gmail and sms.ir](#configure-gmail-and-smsir)
 - [Update and rehearse rollback](#update-and-rehearse-rollback)
 - [Testing and maintenance](#testing-and-maintenance)
@@ -165,7 +166,7 @@ Finish [host preparation](#prepare-the-host) and create the [private database cr
 
 For a rehearsal or shared host, clone and review the release first if you need to pin a specific commit. The shortcuts below use the current `main` branch.
 
-**Private repository with an SSH deploy key**
+#### Private repository with an SSH deploy key
 
 ```bash
 git clone --branch main \
@@ -176,7 +177,7 @@ git clone --branch main \
     --domain staging.example.org --database-env /private/novair/database.env
 ```
 
-**Private repository with a GitHub token**
+#### Private repository with a GitHub token
 
 Use the username and token prompts described under [HTTPS with a GitHub token](#https-with-a-github-token).
 
@@ -188,7 +189,12 @@ git -c credential.helper= clone --branch main \
     --domain staging.example.org --database-env /private/novair/database.env
 ```
 
-**Anonymous HTTPS if the repository becomes public**
+#### Public repository
+
+> [!IMPORTANT]
+> This shortcut works only if **Novair-Team is made public**. The repository is currently private. Use the [SSH deploy key](#private-repository-with-an-ssh-deploy-key) or [GitHub token](#private-repository-with-a-github-token) option above.
+
+Once the repository is public, run the following as the dedicated NovAir user after [preparing the staging host](#prepare-the-host). Replace the domain and credential-file path with your staging values.
 
 ```bash
 git clone --branch main https://github.com/Cat-Ghost-Community/Novair-Team.git novair-staging &&
